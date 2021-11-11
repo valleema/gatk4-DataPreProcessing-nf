@@ -1,0 +1,119 @@
+Bootstrap: docker
+
+From: ubuntu:18.04
+
+
+%labels
+	Maintener Maxime Vallée
+	purpose gatk4-DataPreProcessing-nf
+# sudo -E /home/chu-lyon.fr/valleema/bin/singularity/bin/singularity build /srv/scratch/valleema/gatk4-DataPreProcessing-nf_$(date '+%Y%m%d-%H%M%S').simg /srv/nfs/ngs-stockage/NGS_commun/disnap/bioInfo/Singularity-images/gatk4-DataPreProcessing-nf.def
+
+
+%post
+	export DEBIAN_FRONTEND=noninteractive
+	export ROOT_PATH=$(pwd)
+	apt-get update
+	apt-get dist-upgrade -y
+	apt update
+
+	### setting to local (required for perl and R) to fr:
+	echo 'export LANGUAGE=C' >> $SINGULARITY_ENVIRONMENT
+	echo 'export LANG=C.UTF-8' >> $SINGULARITY_ENVIRONMENT
+	echo 'export LC_ALL=C.UTF-8' >> $SINGULARITY_ENVIRONMENT
+
+	### general dependencies
+	apt-get install -y build-essential cmake			# -> gnu_make, gcc ; or? apt-get install -y automake make g++
+	apt-get install -y wget unzip
+	apt-get install -y zlib1g-dev libbz2-dev liblzma-dev libcurl4-openssl-dev libssl-dev libncurses5-dev
+	apt install -y openjdk-8-jdk						# for all .jar
+
+
+### scripts: 
+	### bwakit
+	wget --no-check-certificate --tries=0 -P /opt https://downloads.sourceforge.net/project/bio-bwa/bwakit/bwakit-0.7.15_x64-linux.tar.bz2
+	tar -jxv -C /opt -f /opt/bwakit-0.7.15_x64-linux.tar.bz2
+	rm -f /opt/bwakit-0.7.15_x64-linux.tar.bz2
+	cd /opt/bwa.kit
+	rm bwa-postalt.js run-bwamem run-gen-ref
+	wget --no-check-certificate --tries=0 https://github.com/lh3/bwa/raw/master/bwakit/bwa-postalt.js
+	wget --no-check-certificate --tries=0 https://github.com/lh3/bwa/raw/master/bwakit/run-bwamem
+	wget --no-check-certificate --tries=0 https://github.com/lh3/bwa/raw/master/bwakit/run-gen-ref
+	chmod +x bwa-postalt.js run-bwamem run-gen-ref
+	cd $ROOT_PATH
+	echo 'export PATH=$PATH:/opt/bwa.kit' >> $SINGULARITY_ENVIRONMENT
+	# -> cmd: bwa
+	# -> cmd: run-gen-ref
+	# -> cmd: run-bwamem
+
+	### sambamba
+	wget --no-check-certificate --tries=0 -P /opt https://github.com/biod/sambamba/releases/download/v0.8.1/sambamba-0.8.1-linux-amd64-static.gz
+	mkdir -p /opt/sambamba-0.8.1
+	gunzip -c /opt/sambamba-0.8.1-linux-amd64-static.gz > /opt/sambamba-0.8.1/sambamba
+	chmod +x /opt/sambamba-0.8.1/sambamba
+	rm -f /opt/sambamba-0.8.1-linux-amd64-static.gz
+	cd $ROOT_PATH
+	echo 'export PATH=$PATH:/opt/sambamba-0.8.1' >> $SINGULARITY_ENVIRONMENT
+	# -> sambamba
+	
+
+	### qualimap
+	wget --no-check-certificate --tries=0 -P /opt https://bitbucket.org/kokonech/qualimap/downloads/qualimap_v2.2.1.zip
+	unzip /opt/qualimap_v2.2.1.zip -d /opt
+	rm -f /opt/qualimap_v2.2.1.zip
+	cd $ROOT_PATH
+	echo 'export PATH=$PATH:/opt/qualimap_v2.2.1' >> $SINGULARITY_ENVIRONMENT
+	# -> qualimap
+
+	### samtools & htslib & bcftools
+	wget --no-check-certificate --tries=0 -P /opt https://github.com/samtools/samtools/releases/download/1.14/samtools-1.14.tar.bz2
+	tar -jxv -C /opt -f /opt/samtools-1.14.tar.bz2
+	rm -f /opt/samtools-1.14.tar.bz2
+	cd /opt/samtools-1.14
+	./configure
+	make
+	make install
+	cd $ROOT_PATH
+	# -> samtools
+
+	wget --no-check-certificate --tries=0 -P /opt https://github.com/samtools/htslib/releases/download/1.14/htslib-1.14.tar.bz2
+	tar -jxv -C /opt -f /opt/htslib-1.14.tar.bz2
+	rm -f /opt/htslib-1.14.tar.bz2
+	cd /opt/htslib-1.14
+	./configure
+	make
+	make install
+	cd $ROOT_PATH
+	# -> bgzip - tabix
+
+	### GATK4
+	wget --no-check-certificate --tries=0 -P /opt https://github.com/broadinstitute/gatk/releases/download/4.2.3.0/gatk-4.2.3.0.zip
+	unzip /opt/gatk-4.2.3.0.zip -d /opt
+	mv /opt/gatk-4.2.3.0/gatk-package-4.2.3.0-local.jar /opt/gatk4.jar
+	rm -rf /opt/gatk-4.2.3.0.zip /opt/gatk-4.2.3.0/
+	# -> java -jar /opt/gatk4.jar
+
+	### picard
+	wget --no-check-certificate --tries=0 -P /opt https://github.com/broadinstitute/picard/releases/download/2.26.4/picard.jar
+	# -> java -jar /opt/picard.jar
+
+	### cleaning
+	rm -rf /opt/http
+	apt-get purge -y make g++ gcc cmake				# désinstalle les paquets indiqués et leurs fichiers de configuration (not git unzip wget --no-check-certificate, on which R depends)
+	apt-get -y autoremove --purge					# désinstalle toutes les dépendances devenues inutiles et leurs fichiers de configuration
+	apt-get -y clean								# supprime la totalité des paquets présents dans /var/cache/apt/archives
+
+
+%test
+	# Outils
+	echo "=== sambamba ==="
+	sambamba -q --version
+	echo "=== samtools ==="
+	samtools --version | head -n 2
+	echo "=== bgzip ==="
+	bgzip --version
+	echo "=== tabix ==="
+	tabix --version
+	echo "=== gatk4 ==="
+	java -jar /opt/gatk4.jar --version
+	echo "=== picard ==="
+	java -jar /opt/picard.jar MarkDuplicates -version || true
