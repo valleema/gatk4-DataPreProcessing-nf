@@ -23,6 +23,7 @@ From: ubuntu:18.04
 
 	### general dependencies
 	apt-get install -y build-essential cmake			# -> gnu_make, gcc ; or? apt-get install -y automake make g++
+	apt-get install -y perl
 	apt-get install -y wget unzip
 	apt-get install -y zlib1g-dev libbz2-dev liblzma-dev libcurl4-openssl-dev libssl-dev libncurses5-dev
 	apt install -y openjdk-8-jdk						# for all .jar
@@ -108,7 +109,7 @@ From: ubuntu:18.04
 	echo "=== sambamba ==="
 	sambamba -q --version
 	echo "=== samtools ==="
-	samtools --version | head -n 2
+	samtools --version
 	echo "=== bgzip ==="
 	bgzip --version
 	echo "=== tabix ==="
