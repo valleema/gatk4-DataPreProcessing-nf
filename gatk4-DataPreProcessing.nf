@@ -38,7 +38,9 @@ if (params.help)
     log.info "--dbsnp                  VCF FILE              dbSNP VCF file"
     log.info "--onekg                  VCF FILE              1000 Genomes High Confidence SNV VCF file"
     log.info "--mills                  VCF FILE              Mills and 1000 Genomes Gold Standard SID VCF file"
-    log.info "--interval_list          INTERVAL_LIST FILE    Interval.list file"
+    log.info "--interval_list          INTERVAL_LIST FILE    GATK wgs calling regions interval_list file"
+    log.info "--bait_bed               BED FILE              Regions of capture probes"
+    log.info "--target_bed             BED FILE              Regions targeted"
     exit 1
 }
 
@@ -53,6 +55,8 @@ params.dbsnp         = null
 params.onekg         = null
 params.mills         = null
 params.interval_list = null
+params.bait_bed      = null
+params.target_bed    = null
 
 
 //
@@ -61,18 +65,58 @@ params.interval_list = null
 Channel.fromFilePairs( params.input )
         .ifEmpty{exit 1, "Cannot find any reads matching: ${params.input}\nNB: Path needs to be enclosed in quotes!" }
         .set{fastq_ch}
-output    = file(params.output_dir)
-ref       = file(params.ref_fasta)
-interList = file(params.interval_list)
-ref_dbsnp = file(params.dbsnp)
-ref_1kg   = file(params.onekg)
-ref_mills = file(params.mills)
-ref_alt   = ref.parent / ref.baseName + ".fa.alt"
-ref_amb   = ref.parent / ref.baseName + ".fa.amb"
-ref_ann   = ref.parent / ref.baseName + ".fa.ann"
-ref_bwt   = ref.parent / ref.baseName + ".fa.bwt"
-ref_pac   = ref.parent / ref.baseName + ".fa.pac"
-ref_sa    = ref.parent / ref.baseName + ".fa.sa"
+output     = file(params.output_dir)
+ref        = file(params.ref_fasta)
+interList  = file(params.interval_list)
+bait_bed   = file(params.bait_bed)
+target_bed = file(params.target_bed)
+ref_dbsnp  = file(params.dbsnp)
+ref_1kg    = file(params.onekg)
+ref_mills  = file(params.mills)
+ref_alt    = ref.parent / ref.baseName + ".fa.alt"
+ref_amb    = ref.parent / ref.baseName + ".fa.amb"
+ref_ann    = ref.parent / ref.baseName + ".fa.ann"
+ref_bwt    = ref.parent / ref.baseName + ".fa.bwt"
+ref_pac    = ref.parent / ref.baseName + ".fa.pac"
+ref_sa     = ref.parent / ref.baseName + ".fa.sa"
+
+//
+// Prep BEDs, intervals, faidx, dict
+//
+process Prep_Files{
+  cpus 1
+  time '4h'
+
+  input:
+    file genome from ref
+
+  output:
+    file "${genome}.fai" into faidx_ch1,faidx_ch2,faidx_ch3
+    file "${genome.baseName}.dict" into dict_ch1,dict_ch2,dict_ch3
+    set "bait.interval_list", "target.interval_list" into metrics_intList_ch
+  
+  script:
+  """
+    samtools faidx ${genome}
+
+    java -jar /opt/picard.jar \
+      CreateSequenceDictionary \
+      R=${genome} \
+      O=${genome.baseName}.dict
+
+    java -jar /opt/picard.jar \
+      BedToIntervalList \
+        I=${bait_bed} \
+        O=bait.interval_list \
+        SD=${genome.baseName}.dict
+
+    java -jar /opt/picard.jar \
+      BedToIntervalList \
+        I=${target_bed} \
+        O=target.interval_list \
+        SD=${genome.baseName}.dict
+  """
+}
 
 //
 // Process Mapping With BWA MEM (AND MORE)
@@ -85,23 +129,23 @@ process BWA_mapping{
   time '12h'
   
   input: 
-      file genome from ref
-      file "${genome.baseName}.fa.alt" from ref_alt
-      file "${genome.baseName}.fa.amb" from ref_amb
-      file "${genome.baseName}.fa.ann" from ref_ann
-      file "${genome.baseName}.fa.bwt" from ref_bwt
-      file "${genome.baseName}.fa.pac" from ref_pac
-      file "${genome.baseName}.fa.sa" from ref_sa
+    file genome from ref
+    file "${genome.baseName}.fa.alt" from ref_alt
+    file "${genome.baseName}.fa.amb" from ref_amb
+    file "${genome.baseName}.fa.ann" from ref_ann
+    file "${genome.baseName}.fa.bwt" from ref_bwt
+    file "${genome.baseName}.fa.pac" from ref_pac
+    file "${genome.baseName}.fa.sa" from ref_sa
 	  set sampleID, file(fastqs) from fastq_ch
   
   output: 
-      set sampleID, file("${sampleID}.aln.bam"), file("${sampleID}.aln.bam.bai") into aln_bam_ch
+    set sampleID, file("${sampleID}.aln.bam"), file("${sampleID}.aln.bam.bai") into aln_bam_ch
 
   script:    
   """
-  run-bwamem -s -t ${task.cpus} -R '@RG\\tID:${sampleID}\\tSM:${sampleID}\\tPL:Illumina' -o ${sampleID} $genome $fastqs | sh
-	
-  sambamba index ${sampleID}.aln.bam
+    run-bwamem -s -t ${task.cpus} -R '@RG\\tID:${sampleID}\\tSM:${sampleID}\\tPL:Illumina' -o ${sampleID} $genome $fastqs | sh
+    
+    sambamba index ${sampleID}.aln.bam
   """
 
 }
@@ -189,7 +233,7 @@ process GATK_BaseRecalibrator_ApplyBQSR{
 //
 // Process Post-Alignment QC
 //
-process QUALIMAP_BamQC{
+process BamQC{
   tag "$sampleID"
 
   cpus 8
@@ -200,22 +244,25 @@ process QUALIMAP_BamQC{
   
   input: 
 	  set sampleID, file(bam), file(bai) from recal_bam_ch1
+	  set file(bait), file(target) from metrics_intList_ch
+    file genome from ref
+    file faidx from faidx_ch1
+    file dict from dict_ch1
 
   output: 
-      set sampleID, file("${sampleID}.recal_stats"), file("${sampleID}.stats.txt") into recal_bam_stats_ch
+    set sampleID, file("${sampleID}.hs_metrics.txt"), file("${sampleID}.stats.txt") into recal_bam_stats_ch
 
   script:    
   """
     samtools flagstat $bam > ${sampleID}.stats.txt
     
-    grep -v "^@" ${interList} | cut -f-3,5 | awk 'BEGIN{OFS="\t"}{print \$1,\$2,\$3,\$4,0,"."}' > tmp.bed
-
-    qualimap bamqc \
-		--java-mem-size=24G \
-		-c \
-		-nt ${task.cpus} \
-    --feature-file tmp.bed \
-		-bam $bam
+    java -jar /opt/picard.jar \
+      CollectHsMetrics \
+        I=$bam \
+        O=${sampleID}.hs_metrics.txt \
+        R=${genome} \
+        BAIT_INTERVALS=${bait} \
+        TARGET_INTERVALS=${target}
 
   """
 }
@@ -231,21 +278,14 @@ process SplitIntervals {
   input:
     file genome from ref
 	  interList
+    file faidx from faidx_ch2
+    file dict from dict_ch2
 
 	output:
     file "scatter/*-scattered.interval_list" into interval_ch
-    file "${genome}.fai" into faidx_ch
-    file "${genome.baseName}.dict" into dict_ch
 
 	script:
 	"""
-    samtools faidx ${genome}
-
-    java -jar /opt/picard.jar \
-      CreateSequenceDictionary \
-      R=${genome} \
-      O=${genome.baseName}.dict
-
     java -Xmx4g -Xms4g -jar /opt/gatk4.jar \
       SplitIntervals \
       -R ${genome} \
@@ -271,8 +311,8 @@ process HaplotypeCaller {
 	
   input:
     file genome from ref
-    file faidx from faidx_ch
-    file dict from dict_ch
+    file faidx from faidx_ch3
+    file dict from dict_ch3
 	  set bamID, file(bam), file(bai), file(Interval) from recal_bam_ch2.spread(interval_ch)
 
 	output:
@@ -305,7 +345,7 @@ process MergeGVCFs {
 
 	tag { bamID }
 	
-  publishDir "$output/gVCF/$sampleID", mode: 'copy'
+  publishDir "$output/gVCF/$bamID", mode: 'copy'
 
   input:
     set bamID, file (gvcfs), file (gvcfidxs) from gvcf_ch.groupTuple()
